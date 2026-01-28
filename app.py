@@ -1,96 +1,100 @@
-import streamlit as st  # Web App
-from PIL import Image   # Image Processing
-import numpy as np      # Image Processing
-import easyocr as ocr   # OCR
+# app_gradio.py
+import gradio as gr
+import numpy as np
+from PIL import Image
+import easyocr as ocr
 
-# -----------------------------
-# Page config & title
-# -----------------------------
-st.set_page_config(page_title="Easy OCR - Extract Text from Images", page_icon="🔎", layout="centered")
+# Optional import for drawing bounding boxes
+import cv2
 
-st.title("Easy OCR - Extract Text from Images")
-st.markdown("## Optical Character Recognition - Using `easyocr`, `streamlit` (works on 🤗 Spaces)")
+# Cache the OCR reader for performance (Gradio has its own caching via global persistence)
+_reader_cache = {}
 
-st.markdown(
-    "Link to the demo app - "
-    "[image-to-text-app on 🤗 Spaces](https://huggingface.co/spaces/Amrrs/image-to-text-app)"
-)
+def get_reader(langs=("en",), use_gpu=False):
+    key = (tuple(langs), use_gpu)
+    if key not in _reader_cache:
+        _reader_cache[key] = ocr.Reader(list(langs), gpu=use_gpu, model_storage_directory=".")
+    return _reader_cache[key]
 
-# -----------------------------
-# Sidebar options
-# -----------------------------
-with st.sidebar:
-    st.header("Options")
-    show_boxes = st.checkbox("Show bounding boxes", value=False, help="Draw boxes around detected text on the image")
-    show_conf = st.checkbox("Show confidence scores", value=True)
-    # If you have a GPU available and EasyOCR compiled for it:
-    use_gpu = st.checkbox("Use GPU (if available)", value=False)
+def run_ocr(image: Image.Image, show_boxes: bool, show_conf: bool, use_gpu: bool, languages: str):
+    """
+    image: PIL image from Gradio
+    show_boxes: bool to render bounding boxes
+    show_conf: bool to include confidence in output
+    use_gpu: bool to initialize OCR reader with GPU
+    languages: comma-separated string like 'en,fr'
+    """
+    if image is None:
+        return None, "Please upload an image.", None
 
-# -----------------------------
-# Cache the OCR Reader (deprec. fix: use st.cache_resource instead of st.cache)
-# -----------------------------
-@st.cache_resource(show_spinner=False)
-def load_reader(langs=("en",), gpu=False):
-    # model_storage_directory can help on platforms with read-only home dirs (e.g., Spaces)
-    return ocr.Reader(list(langs), gpu=gpu, model_storage_directory=".")
+    langs = [l.strip() for l in languages.split(",") if l.strip()]
+    if not langs:
+        langs = ["en"]
 
-reader = load_reader(langs=("en",), gpu=use_gpu)
+    reader = get_reader(langs=tuple(langs), use_gpu=use_gpu)
 
-# -----------------------------
-# Image uploader
-# -----------------------------
-image_file = st.file_uploader(label="Upload your image here", type=["png", "jpg", "jpeg"])
+    # Ensure RGB
+    image = image.convert("RGB")
+    np_img = np.array(image)
 
-if image_file is not None:
-    input_image = Image.open(image_file).convert("RGB")  # ensure RGB mode
-    st.image(input_image, caption="Uploaded Image", use_container_width=True)
+    # detail=1 gives (bbox, text, conf)
+    result = reader.readtext(np_img, detail=1)
 
-    with st.spinner("🤖 Extracting text..."):
-        np_img = np.array(input_image)
-        # detail=1 returns bounding boxes and confidence
-        result = reader.readtext(np_img, detail=1)
+    # Extract text lines
+    lines = [entry[1] for entry in result]
 
-    # Collect text lines
-    lines = [entry[1] for entry in result]  # (bbox, text, conf) -> text is entry[1]
-
-    st.subheader("Extracted Text")
-    if lines:
-        st.write("\n".join(lines))
+    # Prepare textual output
+    if not lines:
+        text_output = "No text detected."
     else:
-        st.info("No text detected.")
+        if show_conf:
+            text_output = "\n".join([f"{entry[1]} (conf: {float(entry[2]):.2f})" for entry in result])
+        else:
+            text_output = "\n".join(lines)
 
-    # Show confidence table (optional)
-    if show_conf and result:
-        st.subheader("Detections (with confidence)")
-        conf_rows = [
-            {
-                "text": entry[1],
-                "confidence": float(entry[2]),
-                "box": entry[0],
-            }
-            for entry in result
-        ]
-        st.dataframe(conf_rows, use_container_width=True)
-
-    # Optionally draw boxes
+    # Optionally draw bounding boxes
+    boxed_preview = None
     if show_boxes and result:
-        import cv2
-
         boxed = np_img.copy()
         for bbox, text, conf in result:
-            # bbox: list of 4 points [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
             pts = np.array(bbox, dtype=np.int32)
             cv2.polylines(boxed, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
-            # Put text label near the first point
             label = text if not show_conf else f"{text} ({conf:.2f})"
             x, y = pts[0]
             cv2.putText(boxed, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
-        st.subheader("Detections Preview")
-        st.image(boxed, caption="Detected boxes", use_container_width=True)
+        boxed_preview = Image.fromarray(boxed)
 
-    st.balloons()  # still supported
-else:
-    st.write("Upload an image to begin.")
+    # Return: original image, textual result, boxed image (optional)
+    return image, text_output, boxed_preview
 
-st.caption("Made with ❤️ by @1littlecoder. Credits to 🤗 Spaces for hosting this.")
+
+with gr.Blocks(title="Easy OCR - Gradio") as demo:
+    gr.Markdown("# 🔎 Easy OCR - Extract Text from Images (Gradio)")
+    gr.Markdown("**Optical Character Recognition** using `easyocr` + `gradio`. Upload an image to extract text.")
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            image_input = gr.Image(type="pil", label="Upload your image", sources=["upload", "clipboard"])
+            languages = gr.Textbox(value="en", label="Languages (comma-separated)", info="e.g., en,fr,de")
+            show_boxes = gr.Checkbox(value=False, label="Show bounding boxes")
+            show_conf = gr.Checkbox(value=True, label="Show confidence scores")
+            use_gpu = gr.Checkbox(value=False, label="Use GPU (if available)")
+
+            run_btn = gr.Button("Run OCR")
+
+        with gr.Column(scale=1):
+            original_preview = gr.Image(label="Original Image", interactive=False)
+            text_output = gr.Textbox(label="Extracted Text", lines=8)
+            boxes_preview = gr.Image(label="Detections (boxes)", interactive=False)
+
+    run_btn.click(
+        fn=run_ocr,
+        inputs=[image_input, show_boxes, show_conf, use_gpu, languages],
+        outputs=[original_preview, text_output, boxes_preview],
+    )
+
+    gr.Markdown("Made with ❤️ using Gradio and EasyOCR")
+
+if __name__ == "__main__":
+    demo.launch()
