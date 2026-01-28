@@ -1,4 +1,4 @@
-streamlit>=1.22
+gradio>=4.0
 easyocr
 torch
 torchvision
