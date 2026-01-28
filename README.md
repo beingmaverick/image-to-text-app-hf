@@ -8,4 +8,4 @@ app_file: app.py
 pinned: false
 short_description: Image to text model for extracting text from images
 # image-to-text-app-hf
-Simple prototype for image to text app using hf model
+Simple prototype for image to text app using hf model and spaces
